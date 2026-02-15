@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations_with_replacement
 
 import e3x
@@ -27,17 +27,31 @@ class BlockIrrepMappingSpec:
         return f"Mapper(nblocks={len(self.block_slices)}, max_ell={self.max_ell}, nfeatures={self.nfeatures})"
 
 
-@dataclass(frozen=True)
+@dataclass()
 class MultiElementPairHBlockMapper:
     # We keep atomic_number_pairs to map onto the hamiltonian block mappers
     mapper: dict[int | tuple[int, int], BlockIrrepMappingSpec]
+    max_ell: int = field(init=False)
+    nfeatures: int = field(init=False)
 
-    def hblocks_to_irreps(self, hblocks, irreps_array, Z_i, Z_j = None):
-        assert len(hblocks) == len(irreps_array)
-        mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted(Z_i, Z_j))]
+    def __post_init__(self):
+        self.max_ell = max([x.max_ell for x in self.mapper.values()])
+        self.nfeatures = max([x.nfeatures for x in self.mapper.values()])
+
+    def hblocks_to_irreps(self, hblocks, Z_i, Z_j = None):
+        # assert len(hblocks) == len(irreps_array)
+        mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted([Z_i, Z_j]))]
 
         ms = mapping_spec
         
+        irreps_array = np.zeros((len(hblocks), 2, (self.max_ell + 1) ** 2, self.nfeatures))
+
+        # Learn even/odd combinations for homonuclear blocks
+        if Z_i == Z_j:
+            hblockseven = 0.5 * (hblocks + np.swapaxes(hblocks, -2, -1))
+            hblocksodd = 0.5 * (hblocks - np.swapaxes(hblocks, -2, -1))
+            hblocks = np.concatenate([hblockseven, hblocksodd], axis=1)
+
         for block_slice, cgc_slice, irreps_slice in zip(
             ms.block_slices, ms.cgc_slices, ms.irreps_slices, strict=True
         ):
@@ -51,10 +65,15 @@ class MultiElementPairHBlockMapper:
                 out=irreps_array[irreps_slice],
                 optimize=True,
             )
+
+        mask = ms.mask
+        mask_slices = [slice(0, len(hblocks)),] + [slice(0, x) for x in mask.shape]
+        # irreps_array[*mask_slices] *= mask
+        # print(mask_slices)
         return irreps_array
 
-    def irreps_to_hblocks(self, hblocks, irreps_array, Z_i, Z_j = None):
-        mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted(Z_i, Z_j))]
+    def irreps_to_hblocks(self, irreps_array, Z_i, Z_j = None):
+        mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted([Z_i, Z_j]))]
 
         ms = mapping_spec
         for block_slice, cgc_slice, irreps_slice in zip(
