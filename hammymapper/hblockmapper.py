@@ -22,6 +22,8 @@ class BlockIrrepMappingSpec:
     nfeatures: int
     mask: np.ndarray
     cgc = np.array(e3x.so3.clebsch_gordan(3, 3, 6, cartesian_order=False))
+    nrows: int
+    ncols: int
 
     def __repr__(self):
         return f"Mapper(nblocks={len(self.block_slices)}, max_ell={self.max_ell}, nfeatures={self.nfeatures})"
@@ -76,6 +78,8 @@ class MultiElementPairHBlockMapper:
         mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted([Z_i, Z_j]))]
 
         ms = mapping_spec
+
+        hblocks = np.zeros((len(irreps_array), ))
         for block_slice, cgc_slice, irreps_slice in zip(
             ms.block_slices, ms.cgc_slices, ms.irreps_slices, strict=True
         ):
@@ -112,6 +116,8 @@ def make_mapper_from_elements(species_ells_dict: dict[int, list[int]]):
                 max_ell=max_ell_for_pair,
                 nfeatures=num_features_for_pair,
                 mask=irrep_mask,
+                nrows=sum([2 * ell + 1 for ell in ells1]),
+                ncols=sum([2 * ell + 1 for ell in ells1])
             )
         )
 
@@ -140,6 +146,8 @@ def make_mapper_from_elements(species_ells_dict: dict[int, list[int]]):
                 max_ell=max_ell_for_pair,
                 nfeatures=num_features_for_pair,
                 mask=irrep_mask,
+                nrows=sum([2 * ell + 1 for ell in ells1]) * (2 if Z_i == Z_j else 1),
+                ncols=sum([2 * ell + 1 for ell in ells2])
             )
         )
     return MultiElementPairHBlockMapper(
