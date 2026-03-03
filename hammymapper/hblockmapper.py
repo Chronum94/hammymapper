@@ -95,15 +95,9 @@ class MultiElementPairHBlockMapper:
         if Z_j is None:
             # Onsite block: real-symmetric (Hermitian).
             # Forward only projected the upper triangle (n2 >= n1).
-            # Reflect each upper off-diagonal subblock into the lower triangle.
-            for row_s, col_s in ms.block_slices:
-                if row_s.start != col_s.start:  # off-diagonal upper block
-                    hblocks_raw[
-                        :, col_s.start:col_s.stop, row_s.start:row_s.stop
-                    ] = np.swapaxes(
-                        hblocks_raw[:, row_s.start:row_s.stop, col_s.start:col_s.stop],
-                        -1, -2,
-                    )
+            # Fill the strictly lower triangle from the upper triangle.
+            tril_r, tril_c = np.tril_indices(ms.nrows, k=-1)
+            hblocks_raw[:, tril_r, tril_c] = hblocks_raw[:, tril_c, tril_r]
             return hblocks_raw
 
         elif Z_i == Z_j:
@@ -115,27 +109,11 @@ class MultiElementPairHBlockMapper:
             hblocks_even = hblocks_raw[:, :nrows_actual, :].copy()
             hblocks_odd  = hblocks_raw[:, nrows_actual:, :].copy()
 
-            for row_s, col_s in ms.block_slices:
-                if row_s.start < nrows_actual:
-                    # Even / symmetric part: H_even[n2,n1] = H_even[n1,n2]^T
-                    if row_s.start != col_s.start:
-                        hblocks_even[
-                            :, col_s.start:col_s.stop, row_s.start:row_s.stop
-                        ] = np.swapaxes(
-                            hblocks_even[:, row_s.start:row_s.stop, col_s.start:col_s.stop],
-                            -1, -2,
-                        )
-                else:
-                    # Odd / antisymmetric part: H_odd[n2,n1] = -H_odd[n1,n2]^T
-                    r_start = row_s.start - nrows_actual
-                    r_stop  = row_s.stop  - nrows_actual
-                    if r_start != col_s.start:
-                        hblocks_odd[
-                            :, col_s.start:col_s.stop, r_start:r_stop
-                        ] = -np.swapaxes(
-                            hblocks_odd[:, r_start:r_stop, col_s.start:col_s.stop],
-                            -1, -2,
-                        )
+            tril_r, tril_c = np.tril_indices(nrows_actual, k=-1)
+            # Even / symmetric part: H_even[n2,n1] = H_even[n1,n2]^T
+            hblocks_even[:, tril_r, tril_c] =  hblocks_even[:, tril_c, tril_r]
+            # Odd / antisymmetric part: H_odd[n2,n1] = -H_odd[n1,n2]^T
+            hblocks_odd[:, tril_r, tril_c]  = -hblocks_odd[:, tril_c, tril_r]
 
             return hblocks_even + hblocks_odd
 
