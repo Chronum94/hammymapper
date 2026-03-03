@@ -79,17 +79,70 @@ class MultiElementPairHBlockMapper:
 
         ms = mapping_spec
 
-        hblocks = np.zeros((len(irreps_array), ))
+        hblocks_raw = np.zeros((len(irreps_array), ms.nrows, ms.ncols))
         for block_slice, cgc_slice, irreps_slice in zip(
             ms.block_slices, ms.cgc_slices, ms.irreps_slices, strict=True
         ):
-            block_slice = (slice(0, len(hblocks)),) + block_slice
-            irreps_slice = (slice(0, len(hblocks)),) + irreps_slice
-            hblocks[block_slice] = np.einsum("...l,mnl->...mn", 
-                                             irreps_array[irreps_slice], 
-                                             ms.cgc[cgc_slice],
-                                             optimize = True
-                                            )
+            block_slice_full = (slice(0, len(irreps_array)),) + block_slice
+            irreps_slice_full = (slice(0, len(irreps_array)),) + irreps_slice
+            hblocks_raw[block_slice_full] = np.einsum(
+                "...l,mnl->...mn",
+                irreps_array[irreps_slice_full],
+                ms.cgc[cgc_slice],
+                optimize=True,
+            )
+
+        if Z_j is None:
+            # Onsite block: real-symmetric (Hermitian).
+            # Forward only projected the upper triangle (n2 >= n1).
+            # Reflect each upper off-diagonal subblock into the lower triangle.
+            for row_s, col_s in ms.block_slices:
+                if row_s.start != col_s.start:  # off-diagonal upper block
+                    hblocks_raw[
+                        :, col_s.start:col_s.stop, row_s.start:row_s.stop
+                    ] = np.swapaxes(
+                        hblocks_raw[:, row_s.start:row_s.stop, col_s.start:col_s.stop],
+                        -1, -2,
+                    )
+            return hblocks_raw
+
+        elif Z_i == Z_j:
+            # Homonuclear pair block.
+            # ms.nrows is doubled: rows 0:N are the even (symmetric) part,
+            # rows N:2N are the odd (antisymmetric) part, matching what
+            # hblocks_to_irreps does when it concatenates hblockseven and hblocksodd.
+            nrows_actual = ms.nrows // 2
+            hblocks_even = hblocks_raw[:, :nrows_actual, :].copy()
+            hblocks_odd  = hblocks_raw[:, nrows_actual:, :].copy()
+
+            for row_s, col_s in ms.block_slices:
+                if row_s.start < nrows_actual:
+                    # Even / symmetric part: H_even[n2,n1] = H_even[n1,n2]^T
+                    if row_s.start != col_s.start:
+                        hblocks_even[
+                            :, col_s.start:col_s.stop, row_s.start:row_s.stop
+                        ] = np.swapaxes(
+                            hblocks_even[:, row_s.start:row_s.stop, col_s.start:col_s.stop],
+                            -1, -2,
+                        )
+                else:
+                    # Odd / antisymmetric part: H_odd[n2,n1] = -H_odd[n1,n2]^T
+                    r_start = row_s.start - nrows_actual
+                    r_stop  = row_s.stop  - nrows_actual
+                    if r_start != col_s.start:
+                        hblocks_odd[
+                            :, col_s.start:col_s.stop, r_start:r_stop
+                        ] = -np.swapaxes(
+                            hblocks_odd[:, r_start:r_stop, col_s.start:col_s.stop],
+                            -1, -2,
+                        )
+
+            return hblocks_even + hblocks_odd
+
+        else:
+            # Heteronuclear pair block: no permutation symmetry,
+            # all subblocks were projected in the forward pass.
+            return hblocks_raw
 
 
 def make_mapper_from_elements(species_ells_dict: dict[int, list[int]]):
