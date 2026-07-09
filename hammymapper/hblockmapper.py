@@ -40,13 +40,11 @@ class MultiElementPairHBlockMapper:
         self.max_ell = max([x.max_ell for x in self.mapper.values()])
         self.nfeatures = max([x.nfeatures for x in self.mapper.values()])
 
-    def hblocks_to_irreps(self, hblocks, Z_i, Z_j = None):
+    def hblocks_to_irreps(self, hblocks, irreps_array, Z_i, Z_j = None):
         # assert len(hblocks) == len(irreps_array)
         mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted([Z_i, Z_j]))]
 
         ms = mapping_spec
-        
-        irreps_array = np.zeros((len(hblocks), 2, (self.max_ell + 1) ** 2, self.nfeatures))
 
         # Learn even/odd combinations for homonuclear blocks
         if Z_i == Z_j:
