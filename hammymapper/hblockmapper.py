@@ -52,6 +52,12 @@ class MultiElementPairHBlockMapper:
             hblocksodd = 0.5 * (hblocks - np.swapaxes(hblocks, -2, -1))
             hblocks = np.concatenate([hblockseven, hblocksodd], axis=1)
 
+        # We order by atomic number, so if the blocks we are handling have Z_j > Z_i, 
+        # we need to transpose them
+        if Z_j:
+            if tuple(sorted([Z_i, Z_j])) != (Z_i, Z_j):
+                hblocks = np.array([hb.T for hb in hblocks])
+
         for block_slice, cgc_slice, irreps_slice in zip(
             ms.block_slices, ms.cgc_slices, ms.irreps_slices, strict=True
         ):
@@ -150,7 +156,7 @@ def make_mapper_from_elements(species_ells_dict: dict[int, list[int]]):
             )
         )
 
-    for Z_i, Z_j in combinations_with_replacement(atomic_numbers, 2):
+    for Z_i, Z_j in combinations_with_replacement(sorted(atomic_numbers), 2):
         ells1 = species_ells_dict[Z_i]
         ells2 = species_ells_dict[Z_j]
         (
