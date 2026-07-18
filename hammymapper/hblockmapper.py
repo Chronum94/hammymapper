@@ -40,19 +40,23 @@ class MultiElementPairHBlockMapper:
         self.max_ell = max([x.max_ell for x in self.mapper.values()])
         self.nfeatures = max([x.nfeatures for x in self.mapper.values()])
 
-    def hblocks_to_irreps(self, hblocks, Z_i, Z_j = None):
+    def hblocks_to_irreps(self, hblocks, irreps_array, Z_i, Z_j = None):
         # assert len(hblocks) == len(irreps_array)
         mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted([Z_i, Z_j]))]
 
         ms = mapping_spec
-        
-        irreps_array = np.zeros((len(hblocks), 2, (self.max_ell + 1) ** 2, self.nfeatures))
 
         # Learn even/odd combinations for homonuclear blocks
         if Z_i == Z_j:
             hblockseven = 0.5 * (hblocks + np.swapaxes(hblocks, -2, -1))
             hblocksodd = 0.5 * (hblocks - np.swapaxes(hblocks, -2, -1))
             hblocks = np.concatenate([hblockseven, hblocksodd], axis=1)
+
+        # We order by atomic number, so if the blocks we are handling have Z_j > Z_i, 
+        # we need to transpose them
+        if Z_j:
+            if tuple(sorted([Z_i, Z_j])) != (Z_i, Z_j):
+                hblocks = np.array([hb.T for hb in hblocks])
 
         for block_slice, cgc_slice, irreps_slice in zip(
             ms.block_slices, ms.cgc_slices, ms.irreps_slices, strict=True
@@ -152,7 +156,7 @@ def make_mapper_from_elements(species_ells_dict: dict[int, list[int]]):
             )
         )
 
-    for Z_i, Z_j in combinations_with_replacement(atomic_numbers, 2):
+    for Z_i, Z_j in combinations_with_replacement(sorted(atomic_numbers), 2):
         ells1 = species_ells_dict[Z_i]
         ells2 = species_ells_dict[Z_j]
         (
