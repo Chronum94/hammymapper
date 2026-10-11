@@ -3,11 +3,24 @@ from dataclasses import dataclass, field
 from itertools import combinations_with_replacement
 
 import e3x
+import jax
 import numpy as np
 
 from hammymapper.utilities import get_pair_mapping_spec, get_element_mapping_spec
 
 log = logging.getLogger(__name__)
+
+# Orbitals up to MAX_ORBITAL_ELL (f) are supported by the Clebsch-Gordan table below.
+MAX_ORBITAL_ELL = 3
+
+# Computed in float64: JAX would otherwise produce float32 coefficients, which limits
+# round trips to ~1e-7 relative accuracy.
+_enable_x64 = (lambda: jax.enable_x64(True)) if hasattr(jax, "enable_x64") else jax.experimental.enable_x64
+with _enable_x64():
+    _CGC = np.asarray(
+        e3x.so3.clebsch_gordan(MAX_ORBITAL_ELL, MAX_ORBITAL_ELL, 2 * MAX_ORBITAL_ELL, cartesian_order=False),
+        dtype=np.float64,
+    )
 
 
 @dataclass(frozen=True)
@@ -21,7 +34,7 @@ class BlockIrrepMappingSpec:
     max_ell: int
     nfeatures: int
     mask: np.ndarray
-    cgc = np.array(e3x.so3.clebsch_gordan(3, 3, 6, cartesian_order=False))
+    cgc = _CGC
     nrows: int
     ncols: int
 
@@ -40,58 +53,89 @@ class MultiElementPairHBlockMapper:
         self.max_ell = max([x.max_ell for x in self.mapper.values()])
         self.nfeatures = max([x.nfeatures for x in self.mapper.values()])
 
+    def _spec(self, Z_i, Z_j):
+        key = Z_i if Z_j is None else tuple(sorted([Z_i, Z_j]))
+        try:
+            return self.mapper[key]
+        except KeyError:
+            raise KeyError(f"No mapping spec for {key}; known keys: {sorted(self.mapper, key=str)}") from None
+
     def hblocks_to_irreps(self, hblocks, irreps_array, Z_i, Z_j = None):
-        # assert len(hblocks) == len(irreps_array)
-        mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted([Z_i, Z_j]))]
+        """Projects a batch of H blocks onto irreps, writing into ``irreps_array`` in place.
 
-        ms = mapping_spec
+        Parameters
+        ----------
+        hblocks : array of shape (batch, n_i, n_j)
+            On-site blocks (Z_j None) or pair blocks H_ij in the (Z_i, Z_j) orientation.
+        irreps_array : array of shape (>= batch, 2, >= (max_ell + 1)**2, >= nfeatures)
+            Output buffer. Rows [:batch] are overwritten completely (unused slots are
+            zeroed), the remaining rows are left untouched. The buffer may be reused
+            and may have a lower precision dtype (e.g. float32).
 
-        # Learn even/odd combinations for homonuclear blocks
+        Returns
+        -------
+        irreps_array
+            The same buffer that was passed in.
+        """
+        ms = self._spec(Z_i, Z_j)
+        hblocks = np.asarray(hblocks)
+        n_i = ms.nrows // 2 if Z_i == Z_j else ms.nrows
+        expected = (n_i, ms.ncols) if (Z_j is None or Z_i <= Z_j) else (ms.ncols, n_i)
+        if hblocks.ndim != 3 or hblocks.shape[1:] != expected:
+            raise ValueError(f"Expected hblocks of shape (batch, {expected[0]}, {expected[1]}) "
+                             f"for Z_i={Z_i}, Z_j={Z_j}; got {hblocks.shape}")
+        nbatch = len(hblocks)
+        if (irreps_array.ndim != 4 or len(irreps_array) < nbatch or irreps_array.shape[1] != 2
+                or irreps_array.shape[2] < (ms.max_ell + 1) ** 2 or irreps_array.shape[3] < ms.nfeatures):
+            raise ValueError(f"irreps_array of shape {irreps_array.shape} cannot hold {nbatch} samples of "
+                             f"(2, {(ms.max_ell + 1) ** 2}, {ms.nfeatures})")
+
+        # Learn even/odd combinations for homonuclear blocks, stacked row-wise as
+        # [even; odd]. Built in one preallocated array to avoid full-size temporaries.
         if Z_i == Z_j:
-            hblockseven = 0.5 * (hblocks + np.swapaxes(hblocks, -2, -1))
-            hblocksodd = 0.5 * (hblocks - np.swapaxes(hblocks, -2, -1))
-            hblocks = np.concatenate([hblockseven, hblocksodd], axis=1)
+            hblocks_t = np.swapaxes(hblocks, -2, -1)
+            stacked = np.empty((nbatch, 2 * n_i, ms.ncols), dtype=np.result_type(hblocks.dtype, np.float32))
+            np.add(hblocks, hblocks_t, out=stacked[:, :n_i])
+            np.subtract(hblocks, hblocks_t, out=stacked[:, n_i:])
+            stacked *= 0.5
+            hblocks = stacked
 
-        # We order by atomic number, so if the blocks we are handling have Z_j > Z_i, 
-        # we need to transpose them
-        if Z_j:
-            if tuple(sorted([Z_i, Z_j])) != (Z_i, Z_j):
-                hblocks = np.array([hb.T for hb in hblocks])
+        # We order by atomic number, so if the blocks we are handling have Z_j < Z_i,
+        # we need to transpose them (a view, no copy)
+        if Z_j is not None and Z_i > Z_j:
+            hblocks = np.swapaxes(hblocks, -2, -1)
 
+        out = irreps_array[:nbatch]
+        out[...] = 0
         for block_slice, cgc_slice, irreps_slice in zip(
             ms.block_slices, ms.cgc_slices, ms.irreps_slices, strict=True
         ):
-            block_slice = (slice(0, len(hblocks)),) + block_slice
-            irreps_slice = (slice(0, len(hblocks)),) + irreps_slice
-
-            np.einsum(
+            # Components that vanish by symmetry are masked to exact zeros
+            out[(slice(None),) + irreps_slice] = ms.mask[irreps_slice] * np.einsum(
                 "...mn,mnl->...l",
-                hblocks[block_slice],
+                hblocks[(slice(None),) + block_slice],
                 ms.cgc[cgc_slice],
-                out=irreps_array[irreps_slice],
                 optimize=True,
             )
-
-        mask = ms.mask
-        mask_slices = [slice(0, len(hblocks)),] + [slice(0, x) for x in mask.shape]
-        # irreps_array[*mask_slices] *= mask
-        # print(mask_slices)
         return irreps_array
 
     def irreps_to_hblocks(self, irreps_array, Z_i, Z_j = None):
-        mapping_spec = self.mapper[Z_i if Z_j is None else tuple(sorted([Z_i, Z_j]))]
+        """Inverse of ``hblocks_to_irreps``. Returns a new array of H blocks in the
+        caller's (Z_i, Z_j) orientation. Masked-off irreps (unused slots and components
+        that vanish by symmetry) are ignored, so arbitrary values there do not leak into H.
+        """
+        ms = self._spec(Z_i, Z_j)
+        irreps_array = np.asarray(irreps_array)
+        nbatch = len(irreps_array)
+        dtype = np.result_type(irreps_array.dtype, np.float32)
 
-        ms = mapping_spec
-
-        hblocks_raw = np.zeros((len(irreps_array), ms.nrows, ms.ncols))
+        hblocks_raw = np.zeros((nbatch, ms.nrows, ms.ncols), dtype=dtype)
         for block_slice, cgc_slice, irreps_slice in zip(
             ms.block_slices, ms.cgc_slices, ms.irreps_slices, strict=True
         ):
-            block_slice_full = (slice(0, len(irreps_array)),) + block_slice
-            irreps_slice_full = (slice(0, len(irreps_array)),) + irreps_slice
-            hblocks_raw[block_slice_full] = np.einsum(
+            hblocks_raw[(slice(None),) + block_slice] = np.einsum(
                 "...l,mnl->...mn",
-                irreps_array[irreps_slice_full],
+                irreps_array[(slice(None),) + irreps_slice] * ms.mask[irreps_slice],
                 ms.cgc[cgc_slice],
                 optimize=True,
             )
@@ -110,8 +154,8 @@ class MultiElementPairHBlockMapper:
             # rows N:2N are the odd (antisymmetric) part, matching what
             # hblocks_to_irreps does when it concatenates hblockseven and hblocksodd.
             nrows_actual = ms.nrows // 2
-            hblocks_even = hblocks_raw[:, :nrows_actual, :].copy()
-            hblocks_odd  = hblocks_raw[:, nrows_actual:, :].copy()
+            hblocks_even = hblocks_raw[:, :nrows_actual, :]
+            hblocks_odd  = hblocks_raw[:, nrows_actual:, :]
 
             tril_r, tril_c = np.tril_indices(nrows_actual, k=-1)
             # Even / symmetric part: H_even[n2,n1] = H_even[n1,n2]^T
@@ -124,10 +168,18 @@ class MultiElementPairHBlockMapper:
         else:
             # Heteronuclear pair block: no permutation symmetry,
             # all subblocks were projected in the forward pass.
+            # Undo the forward transpose to return the caller's (Z_i, Z_j) orientation.
+            if Z_i > Z_j:
+                return np.ascontiguousarray(np.swapaxes(hblocks_raw, -2, -1))
             return hblocks_raw
 
 
 def make_mapper_from_elements(species_ells_dict: dict[int, list[int]]):
+    for Z, ells in species_ells_dict.items():
+        if len(ells) == 0 or min(ells) < 0 or max(ells) > MAX_ORBITAL_ELL:
+            raise ValueError(f"Element {Z}: orbital angular momenta must be a non-empty list "
+                             f"of integers in [0, {MAX_ORBITAL_ELL}], got {ells}")
+
     mapper_keys = []
     mappers = []
 
@@ -196,10 +248,10 @@ def get_mask_dict(
     mask_dict = {}
     for element_pair, blockmapper in pairwise_hmap.mapper.items():
         # This is e3x convention. 2 for parity, angular momentum channels, features
+        # Excludes components that vanish by symmetry (see get_*_mapping_spec)
         mask_array = np.zeros((2, (max_ell + 1) ** 2, nfeatures), dtype=np.int8)
-        for _slice in blockmapper.irreps_slices:
-            log.debug(f"Element pair: {element_pair}, mask:\n{_slice}")
-            mask_array[_slice] = 1
+        m = blockmapper.mask
+        mask_array[:, : m.shape[1], : m.shape[2]] = m
         mask_dict[element_pair] = mask_array
 
         log.debug(f"Element pair: {element_pair}, mask:\n{mask_array}")

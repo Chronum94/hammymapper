@@ -1,95 +1,63 @@
 import numpy as np
 import pytest
+
+from conftest import all_blocks, empty_irreps, full_mask, to_irreps, norb
 from hammymapper.hblockmapper import make_mapper_from_elements
 
-RNG = np.random.default_rng(42)
-ATOL = 1e-7
+ATOL = 1e-12  # float64 Clebsch-Gordan coefficients
 
 
-@pytest.fixture(scope="module")
-def sp_mapper():
-    return make_mapper_from_elements({1: [0, 1]})
+def test_round_trip_all_block_types(species, mapper, rng):
+    """Every on-site, homonuclear and heteronuclear block (both orientations) of a random
+    symmetric H survives hblocks -> irreps -> hblocks."""
+    for label, block, Z_i, Z_j in all_blocks(species, rng):
+        rec = mapper.irreps_to_hblocks(to_irreps(mapper, block, Z_i, Z_j), Z_i, Z_j)
+        assert rec.shape == block.shape, label
+        np.testing.assert_allclose(rec, block, atol=ATOL, err_msg=label)
 
 
-@pytest.fixture(scope="module")
-def sp_spd_mapper():
-    return make_mapper_from_elements({1: [0, 1], 2: [0, 1, 2]})
+def test_round_trip_through_mask(species, mapper, rng):
+    """Model-like usage: only masked-in irreps are predicted (everything else zero). The
+    mask must keep every component that carries information."""
+    for label, block, Z_i, Z_j in all_blocks(species, rng):
+        irreps = to_irreps(mapper, block, Z_i, Z_j) * full_mask(mapper, Z_i, Z_j)
+        np.testing.assert_allclose(mapper.irreps_to_hblocks(irreps, Z_i, Z_j), block, atol=ATOL, err_msg=label)
 
 
-# ── onsite blocks ────────────────────────────────────────────────────────────
-
-def test_onsite_sp_roundtrip(sp_mapper):
-    N = 1 + 3  # s + p
-    H = RNG.random((2, N, N))
-    H = 0.5 * (H + np.swapaxes(H, -1, -2))  # enforce symmetry as actual onsites are
-    H_rec = sp_mapper.irreps_to_hblocks(sp_mapper.hblocks_to_irreps(H, 1), 1)
-    assert np.allclose(H, H_rec, atol=ATOL)
-
-
-def test_onsite_spd_roundtrip():
+def test_homonuclear_block_need_not_be_symmetric(rng):
+    """H_ij for i != j of the same element is a general (non-symmetric) matrix."""
     mapper = make_mapper_from_elements({6: [0, 1, 2]})
-    N = 1 + 3 + 5  # s + p + d
-    H = RNG.random((3, N, N))
-    H = 0.5 * (H + np.swapaxes(H, -1, -2))
-    H_rec = mapper.irreps_to_hblocks(mapper.hblocks_to_irreps(H, 6), 6)
-    assert np.allclose(H, H_rec, atol=ATOL)
+    H = rng.normal(size=(3, 9, 9))
+    np.testing.assert_allclose(mapper.irreps_to_hblocks(to_irreps(mapper, H, 6, 6), 6, 6), H, atol=ATOL)
 
 
-def test_onsite_result_is_symmetric(sp_mapper):
-    N = 1 + 3
-    H = RNG.random((2, N, N))
-    H = 0.5 * (H + np.swapaxes(H, -1, -2))
-    H_rec = sp_mapper.irreps_to_hblocks(sp_mapper.hblocks_to_irreps(H, 1), 1)
-    assert np.allclose(H_rec, np.swapaxes(H_rec, -1, -2), atol=ATOL)
+def test_irreps_round_trip(species, mapper, rng):
+    """irreps -> hblocks -> irreps is the identity on the masked-in irreps (the map is
+    orthogonal on that subspace)."""
+    for Z_i, Z_j in [(Z, None) for Z in species] + [(a, b) for a in species for b in species]:
+        m = full_mask(mapper, Z_i, Z_j)
+        irreps = rng.normal(size=(4,) + m.shape) * m
+        blocks = mapper.irreps_to_hblocks(irreps, Z_i, Z_j)
+        np.testing.assert_allclose(to_irreps(mapper, blocks, Z_i, Z_j), irreps, atol=ATOL, err_msg=str((Z_i, Z_j)))
 
 
-# ── homonuclear pair blocks ───────────────────────────────────────────────────
-
-def test_homonuclear_sp_roundtrip(sp_mapper):
-    N = 1 + 3
-    H = RNG.random((2, N, N))
-    H_rec = sp_mapper.irreps_to_hblocks(sp_mapper.hblocks_to_irreps(H, 1, 1), 1, 1)
-    assert np.allclose(H, H_rec, atol=ATOL)
-
-
-def test_homonuclear_spd_roundtrip():
-    mapper = make_mapper_from_elements({6: [0, 1, 2]})
-    N = 1 + 3 + 5
-    H = RNG.random((3, N, N))
-    H_rec = mapper.irreps_to_hblocks(mapper.hblocks_to_irreps(H, 6, 6), 6, 6)
-    assert np.allclose(H, H_rec, atol=ATOL)
+def test_norm_preserved(species, mapper, rng):
+    """CG maps are orthogonal: ||H||_F == ||irreps|| for heteronuclear blocks, where every
+    subblock is mapped exactly once. (On-site and homonuclear maps only store the n2 >= n1
+    subblocks, so the norm identity does not hold there.)"""
+    for label, block, Z_i, Z_j in all_blocks(species, rng):
+        if Z_j is None or Z_i == Z_j:
+            continue
+        irreps = to_irreps(mapper, block, Z_i, Z_j)
+        np.testing.assert_allclose(np.linalg.norm(irreps), np.linalg.norm(block), rtol=1e-12, err_msg=label)
 
 
-def test_homonuclear_even_part_roundtrip(sp_mapper):
-    N = 1 + 3
-    H = RNG.random((2, N, N))
-    H_rec = sp_mapper.irreps_to_hblocks(sp_mapper.hblocks_to_irreps(H, 1, 1), 1, 1)
-    H_even     = 0.5 * (H     + np.swapaxes(H,     -1, -2))
-    H_even_rec = 0.5 * (H_rec + np.swapaxes(H_rec, -1, -2))
-    assert np.allclose(H_even, H_even_rec, atol=ATOL)
-
-
-def test_homonuclear_odd_part_roundtrip(sp_mapper):
-    N = 1 + 3
-    H = RNG.random((2, N, N))
-    H_rec = sp_mapper.irreps_to_hblocks(sp_mapper.hblocks_to_irreps(H, 1, 1), 1, 1)
-    H_odd     = 0.5 * (H     - np.swapaxes(H,     -1, -2))
-    H_odd_rec = 0.5 * (H_rec - np.swapaxes(H_rec, -1, -2))
-    assert np.allclose(H_odd, H_odd_rec, atol=ATOL)
-
-
-# ── heteronuclear pair blocks ─────────────────────────────────────────────────
-
-def test_heteronuclear_sp_spd_roundtrip(sp_spd_mapper):
-    H = RNG.random((3, 1 + 3, 1 + 3 + 5))
-    H_rec = sp_spd_mapper.irreps_to_hblocks(
-        sp_spd_mapper.hblocks_to_irreps(H, 1, 2), 1, 2
-    )
-    assert np.allclose(H, H_rec, atol=ATOL)
-
-
-def test_heteronuclear_sp_s_roundtrip():
-    mapper = make_mapper_from_elements({1: [0, 1], 2: [0]})
-    H = RNG.random((4, 1 + 3, 1))
-    H_rec = mapper.irreps_to_hblocks(mapper.hblocks_to_irreps(H, 1, 2), 1, 2)
-    assert np.allclose(H, H_rec, atol=ATOL)
+@pytest.mark.parametrize("ells", [[0], [1], [3], [0, 0], [2, 1, 0], [3, 3], [0, 1, 2, 3, 2, 1, 0]])
+def test_single_element_edge_cases(ells, rng):
+    mapper = make_mapper_from_elements({5: ells})
+    n = norb(ells)
+    onsite = rng.normal(size=(2, n, n))
+    onsite = 0.5 * (onsite + np.swapaxes(onsite, -1, -2))
+    pair = rng.normal(size=(2, n, n))
+    np.testing.assert_allclose(mapper.irreps_to_hblocks(to_irreps(mapper, onsite, 5), 5), onsite, atol=ATOL)
+    np.testing.assert_allclose(mapper.irreps_to_hblocks(to_irreps(mapper, pair, 5, 5), 5, 5), pair, atol=ATOL)
