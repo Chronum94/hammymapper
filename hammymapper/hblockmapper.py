@@ -124,7 +124,10 @@ class MultiElementPairHBlockMapper:
         else:
             # Heteronuclear pair block: no permutation symmetry,
             # all subblocks were projected in the forward pass.
-            return hblocks_raw
+            if tuple(sorted([Z_i, Z_j])) != (Z_i, Z_j):
+                return hblocks_raw.swapaxes(-2, -1)
+            else:
+                return hblocks_raw
 
 
 def make_mapper_from_elements(species_ells_dict: dict[int, list[int]]):
