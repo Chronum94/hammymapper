@@ -123,10 +123,14 @@ wheels = [
 [[package]]
 name = "hammymapper"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "e3x" },
     { name = "numpy" },
+]
+
+[package.dev-dependencies]
+dev = [
     { name = "pytest" },
 ]
 
@@ -134,8 +138,10 @@ dependencies = [
 requires-dist = [
     { name = "e3x", specifier = ">=1.0.2" },
     { name = "numpy", specifier = ">=2.3.5" },
-    { name = "pytest", specifier = ">=9.0.1" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.1" }]
 
 [[package]]
 name = "humanize"
